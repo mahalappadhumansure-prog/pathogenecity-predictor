@@ -1,102 +1,235 @@
+
 const $ = (id) => document.getElementById(id);
 let examples = {};
 
 async function init() {
-  examples = await (await fetch("/api/examples")).json();
-  const sel = $("example");
-  Object.keys(examples).forEach((k) => sel.add(new Option(k, k)));
-  sel.onchange = () => fillExample(sel.value);
-  fillExample(sel.value);
+  try {
+    const response = await fetch("/api/examples");
+    if (!response.ok) throw new Error("Could not load DNA examples.");
 
-  document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => {
-    document.querySelectorAll(".tab, .tabpane").forEach((e) => e.classList.remove("active"));
-    t.classList.add("active");
-    $(t.dataset.tab).classList.add("active");
-  }));
+    examples = await response.json();
 
-  const info = await (await fetch("/api/model-info")).json();
-  const m = info.metrics;
-  $("perfView").innerHTML =
-    `<div class="metric"><b>${m.accuracy}</b>Accuracy</div>
-     <div class="metric"><b>${m.roc_auc}</b>ROC-AUC</div>
-     <div class="metric"><b>${m.n_train}</b>Training variants</div>
-     <div class="metric"><b>${m.n_test}</b>Test variants</div>
-     <p class="msg">${m.note}</p>`;
-  renderBars($("impBars"), Object.entries(info.global_importance)
-    .sort((a, b) => b[1] - a[1]).map(([feature, value]) => ({ feature, value })), false);
+    const sel = $("example");
+    sel.innerHTML = "";
 
-  $("predictBtn").onclick = predict;
-  predict();
+    Object.keys(examples).forEach((name) => {
+      sel.add(new Option(name, name));
+    });
+
+    sel.onchange = () => fillExample(sel.value);
+
+    if (sel.options.length > 0) {
+      sel.selectedIndex = 0;
+      fillExample(sel.value);
+    }
+
+    document.querySelectorAll(".tab").forEach((tab) => {
+      tab.onclick = () => {
+        document.querySelectorAll(".tab, .tabpane")
+          .forEach((el) => el.classList.remove("active"));
+
+        tab.classList.add("active");
+        $(tab.dataset.tab)?.classList.add("active");
+      };
+    });
+
+    $("predictBtn").onclick = predict;
+
+    try {
+      const infoResponse = await fetch("/api/model-info");
+      if (infoResponse.ok) {
+        const info = await infoResponse.json();
+        const m = info.metrics || {};
+
+        $("perfView").innerHTML = `
+          <div class="metric"><b>${m.accuracy ?? "—"}</b>Accuracy</div>
+          <div class="metric"><b>${m.roc_auc ?? "—"}</b>ROC-AUC</div>
+          <div class="metric"><b>${m.n_train ?? "—"}</b>Training samples</div>
+          <div class="metric"><b>${m.n_test ?? "—"}</b>Test samples</div>
+          <p class="msg">${m.note || m.source || ""}</p>`;
+
+        const importance = Object.entries(
+          info.global_importance || {}
+        ).map(([feature, value]) => ({ feature, value }));
+
+        renderBars(
+          $("impBars"),
+          importance.sort((a, b) => b.value - a.value),
+          false
+        );
+      }
+    } catch (error) {
+      console.error("Model information error:", error);
+    }
+
+    await predict();
+
+  } catch (error) {
+    console.error("Initialization error:", error);
+    $("error").textContent =
+      "Could not load the DNA examples. Check the Flask server and browser console.";
+    $("error").hidden = false;
+  }
 }
 
 function fillExample(name) {
   const seq = examples[name];
-  $("seq").value = ">" + name.replace(/\s+/g, "_") + "\n" + (seq.match(/.{1,60}/g) || []).join("\n");
+  if (!seq) return;
+
+  $("seq").value =
+    ">" + name.replace(/\s+/g, "_") + "\n" +
+    (seq.match(/.{1,60}/g) || []).join("\n");
 }
 
 function renderBars(el, items, signed = true) {
-  const max = Math.max(...items.map((i) => Math.abs(i.value)), 0.01);
-  el.innerHTML = items.map((i) => {
-    const w = (Math.abs(i.value) / max) * 100;
-    const cls = signed && i.value > 0 ? "fill pos" : "fill";
-    const val = (signed && i.value > 0 ? "+" : "") + i.value.toFixed(2);
-    return `<div class="hb"><span class="name">${i.feature}</span>
-      <div class="track"><div class="${cls}" style="width:${w}%"></div></div><span>${val}</span></div>`;
+  if (!items || items.length === 0) {
+    el.innerHTML = "<p>No feature contributions available.</p>";
+    return;
+  }
+
+  const max = Math.max(
+    ...items.map((item) => Math.abs(Number(item.value) || 0)),
+    0.01
+  );
+
+  el.innerHTML = items.map((item) => {
+    const value = Number(item.value) || 0;
+    const width = Math.abs(value) / max * 100;
+    const cls = signed && value > 0 ? "fill pos" : "fill";
+    const label = (signed && value > 0 ? "+" : "") + value.toFixed(3);
+
+    return `
+      <div class="hb">
+        <span class="name">${item.feature}</span>
+        <div class="track">
+          <div class="${cls}" style="width:${width}%"></div>
+        </div>
+        <span>${label}</span>
+      </div>`;
   }).join("");
 }
 
 async function predict() {
   $("error").hidden = true;
-  const res = await fetch("/api/predict", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sequence: $("seq").value }),
-  });
-  const d = await res.json();
-  if (!res.ok) { $("error").textContent = d.error; $("error").hidden = false; return; }
-  render(d);
-}
 
-function render(d) {
-  const path = d.label === "Pathogenic";
-  $("result").className = "result " + (path ? "path" : "ben");
-  $("cls").textContent = d.label;
-  $("badge").textContent = path ? "HIGH RISK" : "LOW RISK";
-  $("badge").className = "badge " + (path ? "path" : "ben");
-  $("conf").textContent = d.confidence == null ? "n/a" : `${d.confidence.toFixed(2)} (${Math.round(d.confidence * 100)}%)`;
-  $("confBar").style.width = (d.confidence == null ? 0 : d.confidence * 100) + "%";
-  $("msg").textContent = d.message || (d.variant.extra_variants
-    ? `${d.variant.extra_variants} additional variant(s) found; only the first was scored.` : "");
+  try {
+    const response = await fetch("/api/predict", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sequence: $("seq").value })
+    });
 
-  if (d.shap) renderBars($("shapBars"), d.shap); else $("shapBars").innerHTML = "";
+    const data = await response.json();
 
-  const v = d.variant;
-  const rows = [
-    ["Gene", d.gene], ["Sequence Length", d.length + " bp"],
-    ["Variant Position", v ? `${v.position} (nt ${v.nt_position})` : "None"],
-    ["Reference Nucleotide", v ? v.ref_codon : "—"], ["Alternate Nucleotide", v ? v.alt_codon : "—"],
-    ["Amino Acid Change", v ? v.aa_change : "—"],
-    ["Conservation Score", v ? v.conservation.toFixed(2) + (v.conservation > 0.9 ? " (Highly conserved)" : "") : "—"],
-  ];
-  $("info").innerHTML = rows.map(([k, val]) => `<tr><th>${k}</th><td>${val}</td></tr>`).join("");
-
-  renderSequence(d.sequence, v);
-}
-
-function renderSequence(seq, v) {
-  const start = v ? v.codon_start : -1, end = start + 3;
-  let out = "";
-  for (let r = 0; r < seq.length; r += 50) {
-    out += `<span class="ln">${r + 1}</span>`;
-    for (let c = r; c < Math.min(r + 50, seq.length); c += 10) {
-      let chunk = "";
-      for (let i = c; i < Math.min(c + 10, seq.length); i++)
-        chunk += i >= start && i < end ? `<mark>${seq[i]}</mark>` : seq[i];
-      out += chunk + " ";
+    if (!response.ok) {
+      throw new Error(data.error || "Prediction failed.");
     }
-    out += "\n";
+
+    render(data);
+  } catch (error) {
+    console.error("Prediction error:", error);
+    $("error").textContent = error.message;
+    $("error").hidden = false;
+    $("seqBox").textContent =
+      "Sequence could not be displayed. Check the prediction error.";
   }
-  $("seqBox").innerHTML = out;
+}
+
+function render(data) {
+  const variant = data.variant || null;
+  const isPathogenic = data.label === "Pathogenic";
+
+  $("result").className =
+    "result " + (isPathogenic ? "path" : "ben");
+
+  $("cls").textContent = data.label || "Unknown";
+  $("badge").textContent = isPathogenic ? "HIGH RISK" : "LOW RISK";
+  $("badge").className =
+    "badge " + (isPathogenic ? "path" : "ben");
+
+  const confidence = data.confidence;
+
+  $("conf").textContent =
+    confidence == null
+      ? "n/a"
+      : `${Number(confidence).toFixed(2)} (${Math.round(confidence * 100)}%)`;
+
+  $("confBar").style.width =
+    confidence == null ? "0%" : `${confidence * 100}%`;
+
+  $("msg").textContent = data.message || "";
+
+  renderBars($("shapBars"), data.shap || []);
+
+  const rows = [
+    ["Gene", data.gene || "HBB"],
+    ["Sequence Length", `${data.length || 0} bp`],
+    ["Variant Position",
+      variant ? `${variant.position} (nt ${variant.nt_position})` : "None"],
+    ["Reference Nucleotide",
+      variant ? variant.ref_codon : "—"],
+    ["Alternate Nucleotide",
+      variant ? variant.alt_codon : "—"],
+    ["Amino Acid Change",
+      variant ? variant.aa_change : "—"],
+    ["Conservation Score",
+      variant && variant.conservation != null
+        ? Number(variant.conservation).toFixed(2)
+        : "—"]
+  ];
+
+  $("info").innerHTML = rows.map(([key, value]) =>
+    `<tr><th>${key}</th><td>${value}</td></tr>`
+  ).join("");
+
+  renderSequence(data.sequence || "", variant);
+}
+
+function renderSequence(sequence, variant) {
+  const box = $("seqBox");
+
+  if (!sequence) {
+    box.textContent = "No DNA sequence returned by the server.";
+    return;
+  }
+
+  const start = variant && Number.isInteger(variant.codon_start)
+    ? variant.codon_start
+    : -1;
+
+  const end = start >= 0
+    ? Math.min(start + 3, sequence.length)
+    : -1;
+
+  let output = "";
+
+  for (let row = 0; row < sequence.length; row += 50) {
+    output += `<span class="ln">${row + 1}</span>`;
+
+    for (
+      let col = row;
+      col < Math.min(row + 50, sequence.length);
+      col += 10
+    ) {
+      let chunk = "";
+
+      for (let i = col; i < Math.min(col + 10, sequence.length); i++) {
+        const base = sequence[i];
+
+        if (start >= 0 && i >= start && i < end) {
+          chunk += `<mark>${base}</mark>`;
+        } else {
+          chunk += base;
+        }
+      }
+
+      output += chunk + " ";
+    }
+
+    output += "\n";
+  }
+
+  box.innerHTML = output;
 }
 
 init();
